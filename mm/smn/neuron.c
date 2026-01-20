@@ -68,9 +68,9 @@ struct synaptic_neuron *smn_neuron_create(enum neuron_type type, void *id)
 	/* Stats */
 	memset(&neuron->stats, 0, sizeof(neuron->stats));
 
-	/* Lock */
 	spin_lock_init(&neuron->lock);
 	INIT_LIST_HEAD(&neuron->list);
+	INIT_LIST_HEAD(&neuron->recent);
 
 	SMN_DBG("Created neuron %p (type=%d, id=%p)\n", neuron, type, id);
 
@@ -141,23 +141,29 @@ void smn_neuron_activate(struct synaptic_neuron *neuron)
 		}
 	}
 
-	/* Mark as active */
 	neuron->flags |= NEURON_FLAG_ACTIVE;
-
-	/* Update stats */
 	neuron->stats.total_activations++;
 
 	spin_unlock_irqrestore(&neuron->lock, flags);
 
-	/* Update layer stats */
 	if (neuron->layer) {
-		neuron->layer->stats.total_activations++;
+		struct synaptic_layer *layer = neuron->layer;
+		unsigned long rflags;
+
+		layer->stats.total_activations++;
+
+		spin_lock_irqsave(&layer->recent_lock, rflags);
+		if (!list_empty(&neuron->recent))
+			list_del_init(&neuron->recent);
+		list_add(&neuron->recent, &layer->recent_list);
+		if (layer->recent_count < 256)
+			layer->recent_count++;
+		spin_unlock_irqrestore(&layer->recent_lock, rflags);
 	}
 
 	SMN_DBG_NEURON(neuron, "activated (count=%u, rate=%u Hz)\n",
 		       neuron->activation_count, neuron->activation_rate);
 
-	/* Trigger synaptic actions */
 	smn_prefetch_from_neuron(neuron);
 }
 

@@ -136,6 +136,7 @@ void smn_learn_from_recent(struct synaptic_neuron *neuron)
 	u64 neuron_time_ns;
 	u64 other_time_ns;
 	u64 coactivation_window_ns;
+	unsigned long flags;
 	int count = 0;
 
 	if (!neuron || !smn_global.initialized)
@@ -152,7 +153,8 @@ void smn_learn_from_recent(struct synaptic_neuron *neuron)
 	coactivation_window_ns =
 		smn_global.config.coactivation_window * NSEC_PER_MSEC;
 
-	list_for_each_entry(other, &layer->neuron_list, list) {
+	spin_lock_irqsave(&layer->recent_lock, flags);
+	list_for_each_entry(other, &layer->recent_list, recent) {
 		u64 delta_ns;
 
 		if (other == neuron)
@@ -162,14 +164,15 @@ void smn_learn_from_recent(struct synaptic_neuron *neuron)
 		if (other_time_ns == 0)
 			continue;
 
-		if (neuron_time_ns > other_time_ns) {
+		if (neuron_time_ns > other_time_ns)
 			delta_ns = neuron_time_ns - other_time_ns;
-		} else {
+		else
 			delta_ns = other_time_ns - neuron_time_ns;
-		}
 
 		if (delta_ns > coactivation_window_ns)
-			continue;
+			break;
+
+		spin_unlock_irqrestore(&layer->recent_lock, flags);
 
 		switch (smn_global.config.learning_mode) {
 		case SMN_LEARNING_HEBBIAN:
@@ -194,38 +197,45 @@ void smn_learn_from_recent(struct synaptic_neuron *neuron)
 			break;
 		}
 
-		if (++count > 100)
+		spin_lock_irqsave(&layer->recent_lock, flags);
+
+		if (++count > 32)
 			break;
 	}
+	spin_unlock_irqrestore(&layer->recent_lock, flags);
 }
 
-/*
- * Prefetch from neuron along its synapses
- */
 void smn_prefetch_from_neuron(struct synaptic_neuron *neuron)
 {
 	struct synapse *s;
 	int i;
+	int prefetch_count = 0;
 
 	if (!neuron || !smn_global.config.enable_prefetch)
 		return;
 
-	for (i = 0; i < neuron->out_count; i++) {
+	for (i = 0; i < neuron->out_count && prefetch_count < 4; i++) {
+		struct page *target_page;
+
 		s = &neuron->outgoing[i];
 
-		/* Only prefetch strong, predictive synapses */
 		if (!(s->flags & SYNAPSE_FLAG_PREDICTIVE))
 			continue;
 		if (s->weight < smn_global.config.predictive_threshold)
 			continue;
+		if (!s->dst || s->dst->type != NEURON_PAGE)
+			continue;
 
-		/* Mark prediction */
 		s->prediction_count++;
+		s->dst->flags |= NEURON_FLAG_PREDICTED;
 
-		/* TODO: Trigger async readahead */
-		/* For now, just mark the destination as predicted */
-		if (s->dst) {
-			s->dst->flags |= NEURON_FLAG_PREDICTED;
+		target_page = s->dst->id.page;
+		if (!target_page)
+			continue;
+
+		if (PageLRU(target_page)) {
+			prefetch(page_address(target_page));
+			prefetch_count++;
 		}
 	}
 }
@@ -238,41 +248,55 @@ void smn_prefetch_along_synapses(struct synaptic_neuron *neuron)
 	smn_prefetch_from_neuron(neuron);
 }
 
-/*
- * Optimize NUMA placement based on synaptic connections
- */
 void smn_optimize_placement(struct synaptic_neuron *neuron)
 {
 	struct synapse *s;
 	struct synapse *strongest = NULL;
+	struct page *page;
 	u16 max_weight = 0;
 	int i;
+	int target_nid;
+	int current_nid;
 
 	if (!neuron || !smn_global.config.enable_colocate)
 		return;
 
-	/* Find strongest bidirectional synapse */
+	if (neuron->type != NEURON_PAGE || !neuron->id.page)
+		return;
+
 	for (i = 0; i < neuron->out_count; i++) {
 		s = &neuron->outgoing[i];
 
-		if (s->flags & SYNAPSE_FLAG_BIDIRECTIONAL &&
+		if ((s->flags & SYNAPSE_FLAG_BIDIRECTIONAL) &&
 		    s->weight > max_weight) {
 			strongest = s;
 			max_weight = s->weight;
 		}
 	}
 
-	if (strongest && max_weight > smn_global.config.colocate_threshold) {
-		/* Migrate to be with strongest neighbor */
-		int target_nid = strongest->dst->nid;
-		int current_nid = neuron->nid;
+	if (!strongest || max_weight <= smn_global.config.colocate_threshold)
+		return;
 
-		if (target_nid >= 0 && target_nid != current_nid) {
-			/* TODO: Trigger NUMA migration */
-			SMN_DBG("Would migrate neuron %p to node %d\n", neuron,
-				target_nid);
-		}
+	if (!strongest->dst)
+		return;
+
+	target_nid = strongest->dst->nid;
+	current_nid = neuron->nid;
+
+	if (target_nid < 0 || target_nid == current_nid)
+		return;
+
+	page = neuron->id.page;
+	if (!page || PageLocked(page) || !PageLRU(page))
+		return;
+
+#ifdef CONFIG_NUMA
+	if (page_to_nid(page) != target_nid) {
+		neuron->flags |= NEURON_FLAG_MIGRATING;
+		SMN_DBG("Marked neuron %p for migration to node %d\n", neuron,
+			target_nid);
 	}
+#endif
 }
 
 /*

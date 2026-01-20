@@ -135,13 +135,11 @@ void smn_synapse_destroy(struct synaptic_neuron *src, struct synapse *s)
 	}
 }
 
-/*
- * Strengthen a synapse (learning)
- */
 void smn_synapse_strengthen(struct synaptic_neuron *src,
 			    struct synaptic_neuron *dst)
 {
 	struct synapse *s;
+	struct synapse *reverse;
 	u16 delta;
 	unsigned long flags;
 
@@ -154,37 +152,38 @@ void smn_synapse_strengthen(struct synaptic_neuron *src,
 
 	spin_lock_irqsave(&src->lock, flags);
 
-	/* Calculate weight increase based on current weight */
-	delta = smn_global.config.learning_rate *
-		(SMN_WEIGHT_MAX - s->weight) / SMN_WEIGHT_MAX;
+	delta = smn_global.config.learning_rate * (SMN_WEIGHT_MAX - s->weight) /
+		SMN_WEIGHT_MAX;
 
 	s->weight = min(SMN_WEIGHT_MAX, s->weight + delta);
 	s->last_activated = smn_time_ms();
 	s->flags |= SYNAPSE_FLAG_LEARNING;
 
-	/* Set predictive flag if strong enough */
-	if (s->weight > smn_global.config.predictive_threshold) {
+	if (s->weight > smn_global.config.predictive_threshold)
 		s->flags |= SYNAPSE_FLAG_PREDICTIVE;
-	}
 
-	/* Set co-locate flag if very strong */
-	if (s->weight > smn_global.config.colocate_threshold) {
+	if (s->weight > smn_global.config.colocate_threshold)
 		s->flags |= SYNAPSE_FLAG_COLOCATE;
+
+	reverse = smn_find_synapse(dst, src);
+	if (reverse && reverse->weight > 0) {
+		s->flags |= SYNAPSE_FLAG_BIDIRECTIONAL;
+		reverse->flags |= SYNAPSE_FLAG_BIDIRECTIONAL;
 	}
 
 	s->flags &= ~SYNAPSE_FLAG_LEARNING;
 
 	spin_unlock_irqrestore(&src->lock, flags);
 
-	SMN_DBG("Strengthened synapse %p->%p (weight=%u)\n",
-		src, dst, s->weight);
+	SMN_DBG("Strengthened synapse %p->%p (weight=%u)\n", src, dst,
+		s->weight);
 }
 
 /*
  * Weaken a synapse (for pruning)
  */
 void smn_synapse_weaken(struct synaptic_neuron *src,
-		       struct synaptic_neuron *dst)
+			struct synaptic_neuron *dst)
 {
 	struct synapse *s;
 	unsigned long flags;
@@ -224,8 +223,8 @@ void smn_dump_synapses(struct synaptic_neuron *neuron)
 	for (i = 0; i < neuron->out_count; i++) {
 		struct synapse *s = &neuron->outgoing[i];
 
-		pr_info("    -> %p: weight=%u, flags=0x%x\n",
-		       s->dst, s->weight, s->flags);
+		pr_info("    -> %p: weight=%u, flags=0x%x\n", s->dst, s->weight,
+			s->flags);
 		if (s->flags & SYNAPSE_FLAG_PREDICTIVE)
 			pr_cont(" [PREDICTIVE]");
 		if (s->flags & SYNAPSE_FLAG_COLOCATE)
@@ -237,11 +236,12 @@ void smn_dump_synapses(struct synaptic_neuron *neuron)
 
 	pr_info("  Incoming (%u):\n", neuron->in_count);
 	for (i = 0; i < neuron->in_count; i++) {
-		struct synapse *s = smn_find_synapse(neuron->incoming[i], neuron);
+		struct synapse *s =
+			smn_find_synapse(neuron->incoming[i], neuron);
 
 		if (s) {
-			pr_info("    <- %p: weight=%u\n",
-			       neuron->incoming[i], s->weight);
+			pr_info("    <- %p: weight=%u\n", neuron->incoming[i],
+				s->weight);
 		}
 	}
 }

@@ -21,6 +21,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/delay.h>
+#include <linux/debugfs.h>
 
 #include "synaptic.h"
 
@@ -97,8 +98,9 @@ int __init smn_init(void)
 	smn_global.config.max_synapses_per_neuron = max_synapses;
 	smn_global.config.prune_interval = prune_interval;
 
-	/* Initialize mutex */
 	mutex_init(&smn_global.lock);
+	hash_init(smn_global.mm_hash);
+	spin_lock_init(&smn_global.mm_hash_lock);
 
 	/* Create workqueues */
 	smn_global.stats_wq =
@@ -128,6 +130,11 @@ int __init smn_init(void)
 	}
 
 	smn_global.initialized = true;
+
+	for (i = 0; i < LAYER_TYPE_MAX; i++) {
+		if (smn_global.layers[i])
+			smn_layer_start_pruning(smn_global.layers[i]);
+	}
 
 	pr_info("SMN initialized successfully\n");
 	pr_info("  Learning mode: %s\n",
@@ -260,11 +267,98 @@ static ssize_t total_synapses_show(struct kobject *kobj,
 	return sprintf(buf, "%llu\n", total);
 }
 
+static ssize_t enable_colocate_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", smn_global.config.enable_colocate);
+}
+
+static ssize_t enable_colocate_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	bool val;
+
+	if (kstrtobool(buf, &val))
+		return -EINVAL;
+
+	smn_global.config.enable_colocate = val;
+	return count;
+}
+
+static ssize_t learning_rate_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", smn_global.config.learning_rate);
+}
+
+static ssize_t learning_rate_store(struct kobject *kobj,
+				   struct kobj_attribute *attr, const char *buf,
+				   size_t count)
+{
+	u16 val;
+
+	if (kstrtou16(buf, 10, &val))
+		return -EINVAL;
+
+	if (val > 100)
+		return -EINVAL;
+
+	smn_global.config.learning_rate = val;
+	return count;
+}
+
+static ssize_t predictive_threshold_show(struct kobject *kobj,
+					 struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", smn_global.config.predictive_threshold);
+}
+
+static ssize_t predictive_threshold_store(struct kobject *kobj,
+					  struct kobj_attribute *attr,
+					  const char *buf, size_t count)
+{
+	u16 val;
+
+	if (kstrtou16(buf, 10, &val))
+		return -EINVAL;
+
+	if (val > SMN_WEIGHT_MAX)
+		return -EINVAL;
+
+	smn_global.config.predictive_threshold = val;
+	return count;
+}
+
+static ssize_t total_activations_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buf)
+{
+	u64 total = 0;
+	int i;
+
+	for (i = 0; i < LAYER_TYPE_MAX; i++) {
+		if (smn_global.layers[i])
+			total += smn_global.layers[i]->stats.total_activations;
+	}
+
+	return sprintf(buf, "%llu\n", total);
+}
+
 static struct kobj_attribute smn_attr_learning_mode =
 	__ATTR(learning_mode, 0644, learning_mode_show, learning_mode_store);
 
 static struct kobj_attribute smn_attr_enable_prefetch = __ATTR(
 	enable_prefetch, 0644, enable_prefetch_show, enable_prefetch_store);
+
+static struct kobj_attribute smn_attr_enable_colocate = __ATTR(
+	enable_colocate, 0644, enable_colocate_show, enable_colocate_store);
+
+static struct kobj_attribute smn_attr_learning_rate =
+	__ATTR(learning_rate, 0644, learning_rate_show, learning_rate_store);
+
+static struct kobj_attribute smn_attr_predictive_threshold =
+	__ATTR(predictive_threshold, 0644, predictive_threshold_show,
+	       predictive_threshold_store);
 
 static struct kobj_attribute smn_attr_total_neurons =
 	__ATTR(total_neurons, 0444, total_neurons_show, NULL);
@@ -272,11 +366,18 @@ static struct kobj_attribute smn_attr_total_neurons =
 static struct kobj_attribute smn_attr_total_synapses =
 	__ATTR(total_synapses, 0444, total_synapses_show, NULL);
 
+static struct kobj_attribute smn_attr_total_activations =
+	__ATTR(total_activations, 0444, total_activations_show, NULL);
+
 static struct attribute *smn_attrs[] = {
 	&smn_attr_learning_mode.attr,
 	&smn_attr_enable_prefetch.attr,
+	&smn_attr_enable_colocate.attr,
+	&smn_attr_learning_rate.attr,
+	&smn_attr_predictive_threshold.attr,
 	&smn_attr_total_neurons.attr,
 	&smn_attr_total_synapses.attr,
+	&smn_attr_total_activations.attr,
 	NULL,
 };
 
@@ -308,9 +409,118 @@ static void smn_sysfs_exit(void)
 	kobject_put(smn_kobj);
 }
 
-/*
- * /proc support for statistics
- */
+static struct dentry *smn_debugfs_dir;
+
+static int smn_debugfs_neurons_show(struct seq_file *m, void *v)
+{
+	struct synaptic_layer *layer;
+	struct synaptic_neuron *neuron;
+	int i;
+
+	for (i = 0; i < LAYER_TYPE_MAX; i++) {
+		layer = smn_global.layers[i];
+		if (!layer)
+			continue;
+
+		seq_printf(m, "=== Layer %d ===\n", i);
+
+		mutex_lock(&layer->lock);
+		list_for_each_entry(neuron, &layer->neuron_list, list) {
+			seq_printf(
+				m,
+				"  Neuron %p: act=%u rate=%u out=%u in=%u flags=0x%x\n",
+				neuron->id.raw, neuron->activation_count,
+				neuron->activation_rate, neuron->out_count,
+				neuron->in_count, neuron->flags);
+		}
+		mutex_unlock(&layer->lock);
+	}
+
+	return 0;
+}
+
+static int smn_debugfs_synapses_show(struct seq_file *m, void *v)
+{
+	struct synaptic_layer *layer;
+	struct synaptic_neuron *neuron;
+	int i, j;
+
+	layer = smn_global.layers[LAYER_PAGE];
+	if (!layer)
+		return 0;
+
+	seq_printf(m, "=== Synapses (Page Layer, first 100) ===\n");
+
+	mutex_lock(&layer->lock);
+	i = 0;
+	list_for_each_entry(neuron, &layer->neuron_list, list) {
+		if (i++ >= 100)
+			break;
+
+		for (j = 0; j < neuron->out_count; j++) {
+			struct synapse *s = &neuron->outgoing[j];
+			seq_printf(m,
+				   "  %p -> %p: w=%u flags=0x%x pred=%u/%u\n",
+				   neuron->id.raw,
+				   s->dst ? s->dst->id.raw : NULL, s->weight,
+				   s->flags, s->correct_predictions,
+				   s->prediction_count);
+		}
+	}
+	mutex_unlock(&layer->lock);
+
+	return 0;
+}
+
+static int smn_debugfs_config_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "learning_mode: %d\n", smn_global.config.learning_mode);
+	seq_printf(m, "learning_rate: %u\n", smn_global.config.learning_rate);
+	seq_printf(m, "decay_rate: %u\n", smn_global.config.decay_rate);
+	seq_printf(m, "coactivation_window: %u ms\n",
+		   smn_global.config.coactivation_window);
+	seq_printf(m, "predictive_threshold: %u\n",
+		   smn_global.config.predictive_threshold);
+	seq_printf(m, "colocate_threshold: %u\n",
+		   smn_global.config.colocate_threshold);
+	seq_printf(m, "reclaim_protection: %u\n",
+		   smn_global.config.reclaim_protection);
+	seq_printf(m, "max_synapses_per_neuron: %u\n",
+		   smn_global.config.max_synapses_per_neuron);
+	seq_printf(m, "prune_interval: %u ms\n",
+		   smn_global.config.prune_interval);
+	seq_printf(m, "enable_prefetch: %d\n",
+		   smn_global.config.enable_prefetch);
+	seq_printf(m, "enable_colocate: %d\n",
+		   smn_global.config.enable_colocate);
+
+	return 0;
+}
+
+DEFINE_SHOW_ATTRIBUTE(smn_debugfs_neurons);
+DEFINE_SHOW_ATTRIBUTE(smn_debugfs_synapses);
+DEFINE_SHOW_ATTRIBUTE(smn_debugfs_config);
+
+static int __init smn_debugfs_init(void)
+{
+	smn_debugfs_dir = debugfs_create_dir("smn", NULL);
+	if (IS_ERR_OR_NULL(smn_debugfs_dir))
+		return -ENOMEM;
+
+	debugfs_create_file("neurons", 0444, smn_debugfs_dir, NULL,
+			    &smn_debugfs_neurons_fops);
+	debugfs_create_file("synapses", 0444, smn_debugfs_dir, NULL,
+			    &smn_debugfs_synapses_fops);
+	debugfs_create_file("config", 0444, smn_debugfs_dir, NULL,
+			    &smn_debugfs_config_fops);
+
+	return 0;
+}
+
+static void smn_debugfs_exit(void)
+{
+	debugfs_remove_recursive(smn_debugfs_dir);
+}
 
 static int smn_proc_show(struct seq_file *m, void *v)
 {
@@ -379,20 +589,22 @@ static int __init smn_subsys_init(void)
 	if (ret)
 		return ret;
 
-	/* Create sysfs entries */
 	ret = smn_sysfs_init();
 	if (ret) {
 		pr_err("Failed to create sysfs entries: %d\n", ret);
 		goto err_sysfs;
 	}
 
-	/* Create proc entry */
 	entry = proc_create("smn_stats", 0444, NULL, &smn_proc_ops);
 	if (!entry) {
 		pr_err("Failed to create proc entry\n");
 		ret = -ENOMEM;
 		goto err_proc;
 	}
+
+	ret = smn_debugfs_init();
+	if (ret)
+		pr_warn("debugfs init failed: %d (non-fatal)\n", ret);
 
 	pr_info("SMN subsystem loaded\n");
 	return 0;
@@ -407,6 +619,7 @@ module_init(smn_subsys_init);
 
 static void __exit smn_subsys_exit(void)
 {
+	smn_debugfs_exit();
 	remove_proc_entry("smn_stats", NULL);
 	smn_sysfs_exit();
 	smn_exit();

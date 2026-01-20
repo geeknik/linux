@@ -18,9 +18,8 @@
 
 #include "synaptic.h"
 
-/*
- * Create a new synaptic layer
- */
+static void smn_prune_work_func(struct work_struct *work);
+
 struct synaptic_layer *smn_layer_create(enum layer_type type)
 {
 	struct synaptic_layer *layer;
@@ -52,12 +51,13 @@ struct synaptic_layer *smn_layer_create(enum layer_type type)
 	/* Initialize stats */
 	memset(&layer->stats, 0, sizeof(layer->stats));
 
-	/* Initialize lock and list */
 	mutex_init(&layer->lock);
 	INIT_LIST_HEAD(&layer->neuron_list);
+	INIT_LIST_HEAD(&layer->recent_list);
+	spin_lock_init(&layer->recent_lock);
+	layer->recent_count = 0;
 
-	/* Initialize prune work */
-	INIT_DELAYED_WORK(&layer->prune_work, NULL); /* Will be set later */
+	INIT_DELAYED_WORK(&layer->prune_work, smn_prune_work_func);
 
 	SMN_DBG("Created layer %p (type=%d)\n", layer, type);
 
@@ -152,8 +152,7 @@ int smn_layer_add_neuron(struct synaptic_layer *layer,
 		return ret;
 	}
 
-	/* Add to list */
-	list_add_tail(&neuron->list, &layer->neuron_list);
+	list_add_tail_rcu(&neuron->list, &layer->neuron_list);
 
 	/* Link neuron to layer */
 	neuron->layer = layer;
@@ -173,6 +172,49 @@ struct synaptic_neuron *smn_layer_find_neuron(struct synaptic_layer *layer,
 		return NULL;
 
 	return radix_tree_lookup(&layer->neuron_tree, addr);
+}
+
+int smn_layer_remove_neuron(struct synaptic_layer *layer,
+			    struct synaptic_neuron *neuron)
+{
+	unsigned long addr = 0;
+	int i;
+
+	if (!layer || !neuron)
+		return -EINVAL;
+
+	mutex_lock(&layer->lock);
+
+	switch (neuron->type) {
+	case NEURON_PAGE:
+		if (neuron->id.page)
+			addr = page_to_pfn(neuron->id.page);
+		break;
+	case NEURON_VMA:
+		if (neuron->id.vma)
+			addr = (unsigned long)neuron->id.vma->vm_start;
+		break;
+	default:
+		addr = (unsigned long)neuron->id.raw;
+		break;
+	}
+
+	radix_tree_delete(&layer->neuron_tree, addr);
+	list_del_rcu(&neuron->list);
+
+	for (i = 0; i < layer->neuron_count; i++) {
+		if (layer->neurons[i] == neuron) {
+			layer->neurons[i] =
+				layer->neurons[layer->neuron_count - 1];
+			layer->neurons[layer->neuron_count - 1] = NULL;
+			break;
+		}
+	}
+	layer->neuron_count--;
+
+	mutex_unlock(&layer->lock);
+
+	return 0;
 }
 
 void smn_layer_update_stats(struct synaptic_layer *layer)
@@ -302,10 +344,7 @@ void smn_decay_synapses(struct synaptic_layer *layer)
 	}
 }
 
-/*
- * Prune work function
- */
-static void __always_unused smn_prune_work_func(struct work_struct *work)
+static void smn_prune_work_func(struct work_struct *work)
 {
 	struct synaptic_layer *layer;
 
@@ -314,7 +353,6 @@ static void __always_unused smn_prune_work_func(struct work_struct *work)
 
 	smn_prune_synapses(layer);
 
-	/* Reschedule */
 	queue_delayed_work(smn_global.prune_wq, &layer->prune_work,
 			   msecs_to_jiffies(smn_global.config.prune_interval));
 }

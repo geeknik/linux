@@ -21,6 +21,7 @@
 #include <linux/workqueue.h>
 #include <linux/mm.h>
 #include <linux/page-flags.h>
+#include <linux/hashtable.h>
 
 /*
  * Configuration Parameters
@@ -213,6 +214,7 @@ struct synaptic_neuron {
 	/* Synchronization */
 	spinlock_t lock;
 	struct list_head list;
+	struct list_head recent;
 };
 
 /* Neuron flags */
@@ -264,6 +266,9 @@ struct synaptic_layer {
 	struct layer_stats stats;
 	struct mutex lock;
 	struct list_head neuron_list;
+	struct list_head recent_list;
+	spinlock_t recent_lock;
+	u32 recent_count;
 	struct delayed_work prune_work;
 };
 
@@ -303,6 +308,8 @@ struct smn_config {
  * @lock: Global lock
  * @stats_wq: Workqueue for statistics
  * @prune_wq: Workqueue for pruning
+ * @mm_hash: Hash table mapping mm_struct to smn_mm
+ * @mm_hash_lock: Protects mm_hash
  */
 struct smn_system {
 	struct synaptic_layer *layers[LAYER_TYPE_MAX];
@@ -312,6 +319,30 @@ struct smn_system {
 
 	struct workqueue_struct *stats_wq;
 	struct workqueue_struct *prune_wq;
+
+	DECLARE_HASHTABLE(mm_hash, 8);
+	spinlock_t mm_hash_lock;
+};
+
+/**
+ * struct smn_mm - Per-process synaptic memory state
+ * @mm: The associated mm_struct
+ * @layers: Per-process layers (for process-local learning)
+ * @node: List node for smn_global.mm_list
+ * @lock: Protects this structure
+ * @neuron_count: Total neurons in this mm's scope
+ * @synapse_count: Total synapses in this mm's scope
+ *
+ * Each mm_struct gets its own SMN context for security isolation.
+ * Neurons in one process cannot form synapses to another process's neurons.
+ */
+struct smn_mm {
+	struct mm_struct *mm;
+	struct synaptic_layer *layers[LAYER_TYPE_MAX];
+	struct hlist_node node;
+	spinlock_t lock;
+	u32 neuron_count;
+	u32 synapse_count;
 };
 
 /*
@@ -385,6 +416,7 @@ bool smn_reclaim_skip_page(struct page *page);
 /* MM integration */
 int smn_init_mm(struct mm_struct *mm);
 void smn_cleanup_mm(struct mm_struct *mm);
+struct smn_mm *smn_get_mm(struct mm_struct *mm);
 void smn_vma_changed(struct vm_area_struct *vma);
 void smn_vma_unmapped(struct vm_area_struct *vma, unsigned long start,
 		      unsigned long end);
@@ -398,6 +430,11 @@ void smn_dump_synapses(struct synaptic_neuron *neuron);
 void smn_layer_start_pruning(struct synaptic_layer *layer);
 void smn_layer_update_stats(struct synaptic_layer *layer);
 u64 smn_layer_count_synapses(struct synaptic_layer *layer);
+int smn_layer_remove_neuron(struct synaptic_layer *layer,
+			    struct synaptic_neuron *neuron);
+
+/* Page lifecycle hooks */
+void smn_page_free(struct page *page);
 
 /*
  * Utility Functions
