@@ -28,18 +28,19 @@ struct synaptic_neuron *smn_neuron_create(enum neuron_type type, void *id)
 	if (!neuron)
 		return ERR_PTR(-ENOMEM);
 
-	/* Initialize basic fields */
 	neuron->type = type;
 	neuron->id.raw = id;
 	neuron->last_activation = smn_time_ms();
 	neuron->prev_activation = neuron->last_activation;
+	neuron->last_activation_ns = smn_time_ns();
+	neuron->prev_activation_ns = neuron->last_activation_ns;
 	neuron->activation_count = 0;
 	neuron->activation_rate = 0;
 
 	/* Allocate outgoing synapses array */
 	neuron->out_capacity = SMN_MAX_SYNAPSES_PER_NEURON;
-	neuron->outgoing = kzalloc(sizeof(*neuron->outgoing) * neuron->out_capacity,
-				  GFP_KERNEL);
+	neuron->outgoing = kzalloc(
+		sizeof(*neuron->outgoing) * neuron->out_capacity, GFP_KERNEL);
 	if (!neuron->outgoing) {
 		kfree(neuron);
 		return ERR_PTR(-ENOMEM);
@@ -48,8 +49,8 @@ struct synaptic_neuron *smn_neuron_create(enum neuron_type type, void *id)
 
 	/* Allocate incoming synapses array (pointers) */
 	neuron->in_capacity = SMN_MAX_SYNAPSES_PER_NEURON;
-	neuron->incoming = kzalloc(sizeof(*neuron->incoming) * neuron->in_capacity,
-				  GFP_KERNEL);
+	neuron->incoming = kzalloc(
+		sizeof(*neuron->incoming) * neuron->in_capacity, GFP_KERNEL);
 	if (!neuron->incoming) {
 		kfree(neuron->outgoing);
 		kfree(neuron);
@@ -112,27 +113,29 @@ void smn_neuron_destroy(struct synaptic_neuron *neuron)
 void smn_neuron_activate(struct synaptic_neuron *neuron)
 {
 	unsigned long flags;
-	u64 now;
+	u64 now_ms;
+	u64 now_ns;
 	u64 interval;
 
 	if (!neuron)
 		return;
 
-	now = smn_time_ms();
+	now_ms = smn_time_ms();
+	now_ns = smn_time_ns();
 
 	spin_lock_irqsave(&neuron->lock, flags);
 
-	/* Update activation state */
+	/* Update activation state - save previous BEFORE overwriting */
 	neuron->prev_activation = neuron->last_activation;
-	neuron->last_activation = now;
+	neuron->prev_activation_ns = neuron->last_activation_ns;
+	neuron->last_activation = now_ms;
+	neuron->last_activation_ns = now_ns;
 	neuron->activation_count++;
 
-	/* Calculate activation rate (exponential moving average) */
 	if (neuron->prev_activation > 0) {
-		interval = now - neuron->prev_activation;
+		interval = now_ms - neuron->prev_activation;
 		if (interval > 0) {
-			/* Update rate:EMA with alpha = 1/8 */
-			u16 new_rate = 1000 / interval; /* Hz */
+			u16 new_rate = 1000 / interval;
 			neuron->activation_rate =
 				(neuron->activation_rate * 7 + new_rate) / 8;
 		}
@@ -305,14 +308,15 @@ void smn_dump_neurons(struct synaptic_layer *layer)
 
 	list_for_each_entry(neuron, &layer->neuron_list, list) {
 		pr_info("  [%d] Neuron %p: type=%d, activations=%u, rate=%u Hz\n",
-		       count++, neuron, neuron->type,
-		       neuron->activation_count, neuron->activation_rate);
-		pr_info("       Synapses: out=%u, in=%u\n",
-		       neuron->out_count, neuron->in_count);
+			count++, neuron, neuron->type, neuron->activation_count,
+			neuron->activation_rate);
+		pr_info("       Synapses: out=%u, in=%u\n", neuron->out_count,
+			neuron->in_count);
 
 		/* Only print first 20 to avoid spam */
 		if (count >= 20) {
-			pr_info("  ... and %u more\n", layer->neuron_count - 20);
+			pr_info("  ... and %u more\n",
+				layer->neuron_count - 20);
 			break;
 		}
 	}

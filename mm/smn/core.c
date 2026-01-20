@@ -53,7 +53,8 @@ static const struct smn_config smn_config_default = {
  */
 static int learning_mode = SMN_LEARNING_HEBBIAN;
 module_param(learning_mode, int, 0644);
-MODULE_PARM_DESC(learning_mode, "Learning algorithm (0=none, 1=hebbian, 2=stdp, 3=hybrid)");
+MODULE_PARM_DESC(learning_mode,
+		 "Learning algorithm (0=none, 1=hebbian, 2=stdp, 3=hybrid)");
 
 static int enable_prefetch = 1;
 module_param(enable_prefetch, int, 0644);
@@ -100,16 +101,16 @@ int __init smn_init(void)
 	mutex_init(&smn_global.lock);
 
 	/* Create workqueues */
-	smn_global.stats_wq = alloc_workqueue("smn_stats",
-					      WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
+	smn_global.stats_wq =
+		alloc_workqueue("smn_stats", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
 	if (!smn_global.stats_wq) {
 		pr_err("Failed to allocate stats workqueue\n");
 		ret = -ENOMEM;
 		goto err_wq_stats;
 	}
 
-	smn_global.prune_wq = alloc_workqueue("smn_prune",
-					      WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
+	smn_global.prune_wq =
+		alloc_workqueue("smn_prune", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
 	if (!smn_global.prune_wq) {
 		pr_err("Failed to allocate prune workqueue\n");
 		ret = -ENOMEM;
@@ -130,12 +131,19 @@ int __init smn_init(void)
 
 	pr_info("SMN initialized successfully\n");
 	pr_info("  Learning mode: %s\n",
-		smn_global.config.learning_mode == SMN_LEARNING_HEBBIAN ? "Hebbian" :
-		smn_global.config.learning_mode == SMN_LEARNING_STDP ? "STDP" :
-		smn_global.config.learning_mode == SMN_LEARNING_HYBRID ? "Hybrid" : "None");
-	pr_info("  Prefetch: %s\n", smn_global.config.enable_prefetch ? "enabled" : "disabled");
-	pr_info("  Co-location: %s\n", smn_global.config.enable_colocate ? "enabled" : "disabled");
-	pr_info("  Max synapses/neuron: %d\n", smn_global.config.max_synapses_per_neuron);
+		smn_global.config.learning_mode == SMN_LEARNING_HEBBIAN ?
+			"Hebbian" :
+		smn_global.config.learning_mode == SMN_LEARNING_STDP ?
+			"STDP" :
+		smn_global.config.learning_mode == SMN_LEARNING_HYBRID ?
+			"Hybrid" :
+			"None");
+	pr_info("  Prefetch: %s\n",
+		smn_global.config.enable_prefetch ? "enabled" : "disabled");
+	pr_info("  Co-location: %s\n",
+		smn_global.config.enable_colocate ? "enabled" : "disabled");
+	pr_info("  Max synapses/neuron: %d\n",
+		smn_global.config.max_synapses_per_neuron);
 
 	return 0;
 
@@ -190,8 +198,8 @@ static ssize_t learning_mode_show(struct kobject *kobj,
 }
 
 static ssize_t learning_mode_store(struct kobject *kobj,
-				   struct kobj_attribute *attr,
-				   const char *buf, size_t count)
+				   struct kobj_attribute *attr, const char *buf,
+				   size_t count)
 {
 	int mode;
 
@@ -246,7 +254,7 @@ static ssize_t total_synapses_show(struct kobject *kobj,
 
 	for (i = 0; i < LAYER_TYPE_MAX; i++) {
 		if (smn_global.layers[i])
-			total += smn_global.layers[i]->stats.total_activations;
+			total += smn_layer_count_synapses(smn_global.layers[i]);
 	}
 
 	return sprintf(buf, "%llu\n", total);
@@ -255,8 +263,8 @@ static ssize_t total_synapses_show(struct kobject *kobj,
 static struct kobj_attribute smn_attr_learning_mode =
 	__ATTR(learning_mode, 0644, learning_mode_show, learning_mode_store);
 
-static struct kobj_attribute smn_attr_enable_prefetch =
-	__ATTR(enable_prefetch, 0644, enable_prefetch_show, enable_prefetch_store);
+static struct kobj_attribute smn_attr_enable_prefetch = __ATTR(
+	enable_prefetch, 0644, enable_prefetch_show, enable_prefetch_store);
 
 static struct kobj_attribute smn_attr_total_neurons =
 	__ATTR(total_neurons, 0444, total_neurons_show, NULL);
@@ -321,15 +329,21 @@ static int smn_proc_show(struct seq_file *m, void *v)
 
 	for (i = 0; i < LAYER_TYPE_MAX; i++) {
 		struct synaptic_layer *layer = smn_global.layers[i];
+		u64 synapse_count;
 
 		if (!layer)
 			continue;
 
+		smn_layer_update_stats(layer);
+		synapse_count = smn_layer_count_synapses(layer);
+
 		seq_printf(m, "  Layer %d (%s):\n", i,
-			   i == LAYER_PAGE ? "Page" :
-			   i == LAYER_VMA ? "VMA" :
-			   i == LAYER_REGION ? "Region" : "Global");
+			   i == LAYER_PAGE   ? "Page" :
+			   i == LAYER_VMA    ? "VMA" :
+			   i == LAYER_REGION ? "Region" :
+					       "Global");
 		seq_printf(m, "    Neurons: %u\n", layer->neuron_count);
+		seq_printf(m, "    Synapses: %llu\n", synapse_count);
 		seq_printf(m, "    Activations: %llu\n",
 			   layer->stats.total_activations);
 		seq_printf(m, "    Avg Weight: %u\n",
@@ -347,10 +361,10 @@ static int smn_proc_open(struct inode *inode, struct file *file)
 }
 
 static const struct proc_ops smn_proc_ops = {
-	.proc_open	= smn_proc_open,
-	.proc_read	= seq_read,
-	.proc_lseek	= seq_lseek,
-	.proc_release	= single_release,
+	.proc_open = smn_proc_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
 };
 
 /*

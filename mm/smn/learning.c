@@ -21,8 +21,7 @@
  * "Neurons that fire together, wire together"
  */
 void smn_hebbian_learn(struct synaptic_neuron *pre,
-		       struct synaptic_neuron *post,
-		       u64 time_delta_ns)
+		       struct synaptic_neuron *post, u64 time_delta_ns)
 {
 	struct synapse *s;
 	u16 delta;
@@ -31,8 +30,8 @@ void smn_hebbian_learn(struct synaptic_neuron *pre,
 	if (!pre || !post)
 		return;
 
-	/* Check co-activation window */
-	if (time_delta_ns > smn_global.config.coactivation_window * NSEC_PER_MSEC)
+	if (time_delta_ns >
+	    smn_global.config.coactivation_window * NSEC_PER_MSEC)
 		return;
 
 	/* Find or create synapse */
@@ -72,16 +71,15 @@ void smn_hebbian_learn(struct synaptic_neuron *pre,
 
 	spin_unlock_irqrestore(&pre->lock, flags);
 
-	SMN_DBG("Hebbian: %p->%p (delta=%u, weight=%u)\n",
-		pre, post, delta, s->weight);
+	SMN_DBG("Hebbian: %p->%p (delta=%u, weight=%u)\n", pre, post, delta,
+		s->weight);
 }
 
 /*
  * Spike-Timing Dependent Plasticity (STDP)
  * Order matters: causal vs anti-causal
  */
-void smn_stdp_learn(struct synaptic_neuron *pre,
-		    struct synaptic_neuron *post,
+void smn_stdp_learn(struct synaptic_neuron *pre, struct synaptic_neuron *post,
 		    u64 pre_time, u64 post_time)
 {
 	struct synapse *s;
@@ -106,13 +104,15 @@ void smn_stdp_learn(struct synaptic_neuron *pre,
 	if (time_diff > 0 && time_diff < SMN_STDP_WINDOW) {
 		/* Pre before Post: causal, strengthen */
 		/* Weight increase decays with time difference */
-		delta = SMN_STDP_RATE * (SMN_STDP_WINDOW - time_diff) / SMN_STDP_WINDOW;
+		delta = SMN_STDP_RATE * (SMN_STDP_WINDOW - time_diff) /
+			SMN_STDP_WINDOW;
 		s->weight = min(SMN_WEIGHT_MAX, s->weight + delta);
 		s->last_activated = smn_time_ms();
 
 	} else if (time_diff < 0 && -time_diff < SMN_STDP_WINDOW) {
 		/* Post before Pre: anti-causal, weaken */
-		delta = SMN_STDP_RATE * (SMN_STDP_WINDOW + time_diff) / SMN_STDP_WINDOW;
+		delta = SMN_STDP_RATE * (SMN_STDP_WINDOW + time_diff) /
+			SMN_STDP_WINDOW;
 		s->weight = max(0, s->weight - delta);
 	}
 
@@ -125,82 +125,75 @@ void smn_stdp_learn(struct synaptic_neuron *pre,
 
 	spin_unlock_irqrestore(&pre->lock, flags);
 
-	SMN_DBG("STDP: %p->%p (diff=%lld, weight=%u)\n",
-		pre, post, time_diff, s->weight);
+	SMN_DBG("STDP: %p->%p (diff=%lld, weight=%u)\n", pre, post, time_diff,
+		s->weight);
 }
 
-/*
- * Learn from recent activations (called after neuron activation)
- * This is the main learning entry point
- */
 void smn_learn_from_recent(struct synaptic_neuron *neuron)
 {
 	struct synaptic_layer *layer;
 	struct synaptic_neuron *other;
+	u64 neuron_time_ns;
+	u64 other_time_ns;
+	u64 coactivation_window_ns;
 	int count = 0;
 
 	if (!neuron || !smn_global.initialized)
+		return;
+
+	if (smn_global.config.learning_mode == SMN_LEARNING_NONE)
 		return;
 
 	layer = smn_global.layers[LAYER_PAGE];
 	if (!layer)
 		return;
 
-	/* Look for recently activated neurons in the same layer */
+	neuron_time_ns = neuron->last_activation_ns;
+	coactivation_window_ns =
+		smn_global.config.coactivation_window * NSEC_PER_MSEC;
+
 	list_for_each_entry(other, &layer->neuron_list, list) {
+		u64 delta_ns;
+
 		if (other == neuron)
 			continue;
 
-		/* Check co-activation timing */
-		if (other->last_activation > neuron->last_activation) {
-			/* Other activated after us */
-			u64 delta = (other->last_activation - neuron->last_activation) * NSEC_PER_MSEC;
+		other_time_ns = other->last_activation_ns;
+		if (other_time_ns == 0)
+			continue;
 
-			/* Apply learning based on configured mode */
-			switch (smn_global.config.learning_mode) {
-			case SMN_LEARNING_HEBBIAN:
-				smn_hebbian_learn(neuron, other, delta);
-				break;
-			case SMN_LEARNING_STDP:
-				smn_stdp_learn(neuron, other,
-					       neuron->last_activation * NSEC_PER_MSEC,
-					       other->last_activation * NSEC_PER_MSEC);
-				break;
-			case SMN_LEARNING_HYBRID:
-				smn_hebbian_learn(neuron, other, delta);
-				smn_stdp_learn(neuron, other,
-					      neuron->last_activation * NSEC_PER_MSEC,
-					      other->last_activation * NSEC_PER_MSEC);
-				break;
-			default:
-				break;
-			}
-
+		if (neuron_time_ns > other_time_ns) {
+			delta_ns = neuron_time_ns - other_time_ns;
 		} else {
-			/* We activated after other */
-			u64 delta = (neuron->last_activation - other->last_activation) * NSEC_PER_MSEC;
-
-			switch (smn_global.config.learning_mode) {
-			case SMN_LEARNING_HEBBIAN:
-				smn_hebbian_learn(other, neuron, delta);
-				break;
-			case SMN_LEARNING_STDP:
-				smn_stdp_learn(other, neuron,
-					       other->last_activation * NSEC_PER_MSEC,
-					       neuron->last_activation * NSEC_PER_MSEC);
-				break;
-			case SMN_LEARNING_HYBRID:
-				smn_hebbian_learn(other, neuron, delta);
-				smn_stdp_learn(other, neuron,
-					      other->last_activation * NSEC_PER_MSEC,
-					      neuron->last_activation * NSEC_PER_MSEC);
-				break;
-			default:
-				break;
-			}
+			delta_ns = other_time_ns - neuron_time_ns;
 		}
 
-		/* Limit scan for performance */
+		if (delta_ns > coactivation_window_ns)
+			continue;
+
+		switch (smn_global.config.learning_mode) {
+		case SMN_LEARNING_HEBBIAN:
+			if (other_time_ns < neuron_time_ns)
+				smn_hebbian_learn(other, neuron, delta_ns);
+			else
+				smn_hebbian_learn(neuron, other, delta_ns);
+			break;
+		case SMN_LEARNING_STDP:
+			smn_stdp_learn(other, neuron, other_time_ns,
+				       neuron_time_ns);
+			break;
+		case SMN_LEARNING_HYBRID:
+			if (other_time_ns < neuron_time_ns)
+				smn_hebbian_learn(other, neuron, delta_ns);
+			else
+				smn_hebbian_learn(neuron, other, delta_ns);
+			smn_stdp_learn(other, neuron, other_time_ns,
+				       neuron_time_ns);
+			break;
+		default:
+			break;
+		}
+
 		if (++count > 100)
 			break;
 	}
@@ -276,8 +269,8 @@ void smn_optimize_placement(struct synaptic_neuron *neuron)
 
 		if (target_nid >= 0 && target_nid != current_nid) {
 			/* TODO: Trigger NUMA migration */
-			SMN_DBG("Would migrate neuron %p to node %d\n",
-				neuron, target_nid);
+			SMN_DBG("Would migrate neuron %p to node %d\n", neuron,
+				target_nid);
 		}
 	}
 }
@@ -309,7 +302,8 @@ void smn_prediction_feedback(struct synaptic_neuron *predicted)
 
 			/* Strengthen accurate predictors */
 			spin_lock_irqsave(&src->lock, flags);
-			u16 bonus = min(100, 1000 / (s->correct_predictions + 1));
+			u16 bonus =
+				min(100, 1000 / (s->correct_predictions + 1));
 			s->weight = min(SMN_WEIGHT_MAX, s->weight + bonus);
 			spin_unlock_irqrestore(&src->lock, flags);
 		}

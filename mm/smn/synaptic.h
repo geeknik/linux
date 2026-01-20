@@ -25,36 +25,36 @@
 /*
  * Configuration Parameters
  */
-#define SMN_NAME			"smn"
+#define SMN_NAME "smn"
 
 /* Synaptic weights */
-#define SMN_WEIGHT_MAX			1000	/* Maximum synapse weight */
-#define SMN_WEIGHT_MIN			0	/* Minimum synapse weight */
-#define SMN_PREDICTIVE_THRESHOLD	500	/* Weight to enable prefetch */
-#define SMN_COLOCATE_THRESHOLD		700	/* Weight to enable co-location */
-#define SMN_RECLAIM_PROTECT_THRESHOLD	400	/* Weight to protect from reclaim */
-#define SMN_MIN_WEIGHT			50	/* Minimum weight before pruning */
+#define SMN_WEIGHT_MAX 1000 /* Maximum synapse weight */
+#define SMN_WEIGHT_MIN 0 /* Minimum synapse weight */
+#define SMN_PREDICTIVE_THRESHOLD 500 /* Weight to enable prefetch */
+#define SMN_COLOCATE_THRESHOLD 700 /* Weight to enable co-location */
+#define SMN_RECLAIM_PROTECT_THRESHOLD 400 /* Weight to protect from reclaim */
+#define SMN_MIN_WEIGHT 50 /* Minimum weight before pruning */
 
 /* Timing parameters (in nanoseconds) */
-#define SMN_COACTIVATION_WINDOW		(100 * NSEC_PER_MSEC)	/* 100ms */
-#define SMN_RAPID_WINDOW		(10 * NSEC_PER_MSEC)	/* 10ms */
-#define SMN_STDP_WINDOW		(50 * NSEC_PER_MSEC)	/* 50ms */
+#define SMN_COACTIVATION_WINDOW (100 * NSEC_PER_MSEC) /* 100ms */
+#define SMN_RAPID_WINDOW (10 * NSEC_PER_MSEC) /* 10ms */
+#define SMN_STDP_WINDOW (50 * NSEC_PER_MSEC) /* 50ms */
 
 /* Learning rates */
-#define SMN_HEBBIAN_LEARNING_RATE	10	/* Weight units per co-activation */
-#define SMN_STDP_RATE			20	/* Weight units for STDP */
-#define SMN_DECAY_RATE			1000	/* ms per weight unit decay */
+#define SMN_HEBBIAN_LEARNING_RATE 10 /* Weight units per co-activation */
+#define SMN_STDP_RATE 20 /* Weight units for STDP */
+#define SMN_DECAY_RATE 1000 /* ms per weight unit decay */
 
 /* Capacity limits */
-#define SMN_MAX_SYNAPSES_PER_NEURON	16	/* Outgoing synapses per neuron */
-#define SMN_NEURON_INITIAL_CAPACITY	256	/* Initial neurons per layer */
+#define SMN_MAX_SYNAPSES_PER_NEURON 16 /* Outgoing synapses per neuron */
+#define SMN_NEURON_INITIAL_CAPACITY 256 /* Initial neurons per layer */
 
 /* Reclaim thresholds */
-#define SMN_RECLAIM_IDLE_THRESHOLD	(30 * 1000)	/* 30 seconds in ms */
-#define SMN_ACTIVE_RATE_THRESHOLD	10		/* Hz */
+#define SMN_RECLAIM_IDLE_THRESHOLD (30 * 1000) /* 30 seconds in ms */
+#define SMN_ACTIVE_RATE_THRESHOLD 10 /* Hz */
 
 /* Debug */
-#define SMN_DEBUG			0	/* Enable debug output */
+#define SMN_DEBUG 0 /* Enable debug output */
 
 /*
  * Enums
@@ -134,11 +134,11 @@ struct synapse {
 };
 
 /* Synapse flags */
-#define SYNAPSE_FLAG_BIDIRECTIONAL	BIT(0)	/* Mutual activation */
-#define SYNAPSE_FLAG_PREDICTIVE		BIT(1)	/* Prefetch enabled */
-#define SYNAPSE_FLAG_COLOCATE		BIT(2)	/* Try to place together */
-#define SYNAPSE_FLAG_PROTECT		BIT(3)	/* Protect from reclaim */
-#define SYNAPSE_FLAG_LEARNING		BIT(4)	/* Currently being updated */
+#define SYNAPSE_FLAG_BIDIRECTIONAL BIT(0) /* Mutual activation */
+#define SYNAPSE_FLAG_PREDICTIVE BIT(1) /* Prefetch enabled */
+#define SYNAPSE_FLAG_COLOCATE BIT(2) /* Try to place together */
+#define SYNAPSE_FLAG_PROTECT BIT(3) /* Protect from reclaim */
+#define SYNAPSE_FLAG_LEARNING BIT(4) /* Currently being updated */
 
 /**
  * struct neuron_stats - Statistics for a neuron
@@ -188,6 +188,8 @@ struct synaptic_neuron {
 	/* State */
 	u64 last_activation;
 	u64 prev_activation;
+	u64 last_activation_ns;
+	u64 prev_activation_ns;
 	u32 activation_count;
 	u16 activation_rate;
 
@@ -214,10 +216,10 @@ struct synaptic_neuron {
 };
 
 /* Neuron flags */
-#define NEURON_FLAG_ACTIVE		BIT(0)	/* Recently active */
-#define NEURON_FLAG_PREDICTED		BIT(1)	/* Was predicted access */
-#define NEURON_FLAG_PROTECTED		BIT(2)	/* Protected from reclaim */
-#define NEURON_FLAG_MIGRATING		BIT(3)	/* Being migrated */
+#define NEURON_FLAG_ACTIVE BIT(0) /* Recently active */
+#define NEURON_FLAG_PREDICTED BIT(1) /* Was predicted access */
+#define NEURON_FLAG_PROTECTED BIT(2) /* Protected from reclaim */
+#define NEURON_FLAG_MIGRATING BIT(3) /* Being migrated */
 
 /**
  * struct layer_stats - Statistics for a synaptic layer
@@ -353,10 +355,8 @@ void smn_synapse_weaken(struct synaptic_neuron *src,
 
 /* Learning algorithms */
 void smn_hebbian_learn(struct synaptic_neuron *pre,
-		       struct synaptic_neuron *post,
-		       u64 time_delta_ns);
-void smn_stdp_learn(struct synaptic_neuron *pre,
-		    struct synaptic_neuron *post,
+		       struct synaptic_neuron *post, u64 time_delta_ns);
+void smn_stdp_learn(struct synaptic_neuron *pre, struct synaptic_neuron *post,
 		    u64 pre_time, u64 post_time);
 void smn_learn_from_recent(struct synaptic_neuron *neuron);
 
@@ -387,7 +387,7 @@ int smn_init_mm(struct mm_struct *mm);
 void smn_cleanup_mm(struct mm_struct *mm);
 void smn_vma_changed(struct vm_area_struct *vma);
 void smn_vma_unmapped(struct vm_area_struct *vma, unsigned long start,
-		     unsigned long end);
+		      unsigned long end);
 
 /* Statistics and debugging */
 void smn_stats_print(void);
@@ -396,6 +396,8 @@ void smn_dump_synapses(struct synaptic_neuron *neuron);
 
 /* Layer functions that need to be exported */
 void smn_layer_start_pruning(struct synaptic_layer *layer);
+void smn_layer_update_stats(struct synaptic_layer *layer);
+u64 smn_layer_count_synapses(struct synaptic_layer *layer);
 
 /*
  * Utility Functions
@@ -404,6 +406,11 @@ void smn_layer_start_pruning(struct synaptic_layer *layer);
 static inline u64 smn_time_ms(void)
 {
 	return jiffies_to_msecs(jiffies);
+}
+
+static inline u64 smn_time_ns(void)
+{
+	return ktime_get_ns();
 }
 
 static inline bool smn_is_active(u64 last_activation, u64 threshold_ms)
@@ -415,12 +422,16 @@ static inline bool smn_is_active(u64 last_activation, u64 threshold_ms)
  * Debugging macros
  */
 #if SMN_DEBUG
-#define SMN_DBG(fmt, args...)	pr_info("SMN: " fmt, ##args)
+#define SMN_DBG(fmt, args...) pr_info("SMN: " fmt, ##args)
 #define SMN_DBG_NEURON(n, fmt, args...) \
 	pr_info("SMN neuron %p: " fmt, n, ##args)
 #else
-#define SMN_DBG(fmt, args...)	do {} while (0)
-#define SMN_DBG_NEURON(n, fmt, args...)	do {} while (0)
+#define SMN_DBG(fmt, args...) \
+	do {                  \
+	} while (0)
+#define SMN_DBG_NEURON(n, fmt, args...) \
+	do {                            \
+	} while (0)
 #endif
 
 #endif /* _MM_SMN_SYNAPTIC_H */

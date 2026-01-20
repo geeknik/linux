@@ -34,8 +34,8 @@ struct synaptic_layer *smn_layer_create(enum layer_type type)
 	layer->neuron_count = 0;
 
 	/* Allocate neuron array */
-	layer->neurons = kzalloc(sizeof(*layer->neurons) * layer->neuron_capacity,
-				 GFP_KERNEL);
+	layer->neurons = kzalloc(
+		sizeof(*layer->neurons) * layer->neuron_capacity, GFP_KERNEL);
 	if (!layer->neurons) {
 		kfree(layer);
 		return ERR_PTR(-ENOMEM);
@@ -116,8 +116,8 @@ int smn_layer_add_neuron(struct synaptic_layer *layer,
 		struct synaptic_neuron **new_neurons;
 
 		new_neurons = krealloc(layer->neurons,
-				      sizeof(*new_neurons) * new_capacity,
-				      GFP_KERNEL);
+				       sizeof(*new_neurons) * new_capacity,
+				       GFP_KERNEL);
 		if (!new_neurons) {
 			mutex_unlock(&layer->lock);
 			return -ENOMEM;
@@ -160,15 +160,12 @@ int smn_layer_add_neuron(struct synaptic_layer *layer,
 
 	mutex_unlock(&layer->lock);
 
-	SMN_DBG("Added neuron %p to layer %p (addr=%lx)\n",
-		neuron, layer, addr);
+	SMN_DBG("Added neuron %p to layer %p (addr=%lx)\n", neuron, layer,
+		addr);
 
 	return 0;
 }
 
-/*
- * Find a neuron by address in a layer
- */
 struct synaptic_neuron *smn_layer_find_neuron(struct synaptic_layer *layer,
 					      unsigned long addr)
 {
@@ -176,6 +173,49 @@ struct synaptic_neuron *smn_layer_find_neuron(struct synaptic_layer *layer,
 		return NULL;
 
 	return radix_tree_lookup(&layer->neuron_tree, addr);
+}
+
+void smn_layer_update_stats(struct synaptic_layer *layer)
+{
+	struct synaptic_neuron *neuron;
+	u64 total_weight = 0;
+	u64 total_synapses = 0;
+
+	if (!layer)
+		return;
+
+	list_for_each_entry(neuron, &layer->neuron_list, list) {
+		int i;
+
+		total_synapses += neuron->out_count;
+		for (i = 0; i < neuron->out_count; i++)
+			total_weight += neuron->outgoing[i].weight;
+	}
+
+	if (total_synapses > 0)
+		layer->stats.avg_synapse_weight = total_weight / total_synapses;
+	else
+		layer->stats.avg_synapse_weight = 0;
+
+	if (layer->neuron_count > 0)
+		layer->stats.connectivity =
+			total_synapses / layer->neuron_count;
+	else
+		layer->stats.connectivity = 0;
+}
+
+u64 smn_layer_count_synapses(struct synaptic_layer *layer)
+{
+	struct synaptic_neuron *neuron;
+	u64 total = 0;
+
+	if (!layer)
+		return 0;
+
+	list_for_each_entry(neuron, &layer->neuron_list, list)
+		total += neuron->out_count;
+
+	return total;
 }
 
 /*
@@ -195,7 +235,7 @@ void smn_prune_synapses(struct synaptic_layer *layer)
 	list_for_each_entry(neuron, &layer->neuron_list, list) {
 		spin_lock_irqsave(&neuron->lock, flags);
 
-		for (i = 0; i < neuron->out_count; ) {
+		for (i = 0; i < neuron->out_count;) {
 			struct synapse *s = &neuron->outgoing[i];
 			u64 idle_time = smn_time_ms() - s->last_activated;
 			u16 decay;
@@ -218,7 +258,8 @@ void smn_prune_synapses(struct synaptic_layer *layer)
 			if (s->weight < SMN_MIN_WEIGHT && s->weight == 0) {
 				/* Remove by shifting */
 				for (j = i; j < neuron->out_count - 1; j++) {
-					neuron->outgoing[j] = neuron->outgoing[j + 1];
+					neuron->outgoing[j] =
+						neuron->outgoing[j + 1];
 				}
 				neuron->out_count--;
 				/* Don't increment i, check new element at this position */
@@ -268,8 +309,8 @@ static void __always_unused smn_prune_work_func(struct work_struct *work)
 {
 	struct synaptic_layer *layer;
 
-	layer = container_of(to_delayed_work(work),
-			     struct synaptic_layer, prune_work);
+	layer = container_of(to_delayed_work(work), struct synaptic_layer,
+			     prune_work);
 
 	smn_prune_synapses(layer);
 
