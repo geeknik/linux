@@ -28,6 +28,10 @@
 #include <linux/memremap.h>
 #include <linux/percpu.h>
 #include <linux/cpu.h>
+
+#ifdef CONFIG_SMN
+#include "smn/synaptic.h"
+#endif
 #include <linux/notifier.h>
 #include <linux/backing-dev.h>
 #include <linux/memcontrol.h>
@@ -485,6 +489,18 @@ void folio_mark_accessed(struct folio *folio)
 	}
 	if (folio_test_idle(folio))
 		folio_clear_idle(folio);
+
+#ifdef CONFIG_SMN
+	/*
+	 * Synaptic Memory Network: Learn from page access patterns
+	 * Every page access is a neuron activation - this is where learning happens
+	 * Exclude swap cache pages as they are temporary I/O buffers
+	 */
+	if (!folio_test_swapcache(folio)) {
+		struct page *page = folio_page(folio, 0);
+		smn_mark_page_accessed(page);
+	}
+#endif
 }
 EXPORT_SYMBOL(folio_mark_accessed);
 
