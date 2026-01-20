@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config SMN
+	bool "Synaptic Memory Network support"
+	depends on MMU
+	select RADIX_TREE
+	help
+	  Synaptic Memory Network (SMN) is a bio-inspired memory
+	  management system that applies neural network principles to
+	  operating system memory management.
+
+	  Memory regions are connected by "synapses" that strengthen
+	  and weaken based on access patterns. The kernel learns
+	  application behavior and optimizes memory placement,
+	  prefetching, and reclaim based on these learned relationships.
+
+	  If unsure, say N.
+
+config SMN_DEBUG
+	bool "SMN debugging"
+	depends on SMN
+	help
+	  Enable debug output for SMN. This will print information
+	  about neuron activations, synaptic changes, and learning events.
+
+	  If unsure, say N.
+
+config SMN_STATS
+	bool "Collect SMN statistics"
+	depends on SMN
+	default y
+	help
+	  Collect statistics about SMN operation, including neuron
+	  counts, synapse weights, and prediction accuracy.
+
+	  If unsure, say Y.
+
+choice
+	prompt "SMN learning algorithm"
+	depends on SMN
+	default SMN_LEARNING_HEBBIAN
+	help
+	  Select the learning algorithm used by SMN.
+
+config SMN_LEARNING_NONE
+	bool "None (static, no learning)"
+	depends on SMN
+
+config SMN_LEARNING_HEBBIAN
+	bool "Hebbian learning"
+	depends on SMN
+	help
+	  Basic Hebbian learning: "neurons that fire together, wire together."
+	  Strengthens synapses between co-activated memory regions.
+
+config SMN_LEARNING_STDP
+	bool "Spike-Timing Dependent Plasticity"
+	depends on SMN
+	help
+	  STDP learning with temporal precision. Considers the order
+	  and timing of activations to strengthen causal relationships
+	  and weaken anti-causal ones.
+
+config SMN_LEARNING_HYBRID
+	bool "Hybrid Hebbian+STDP"
+	depends on SMN
+	help
+	  Combined approach using both Hebbian and STDP learning
+	  for maximum pattern recognition.
+
+endchoice
+
+config SMN_PREFETCH
+	bool "Enable synaptic prefetching"
+	depends on SMN
+	default y
+	help
+	  Enable automatic prefetching based on learned synaptic
+	  relationships. When a memory region is accessed, regions
+	  with strong predictive synapses will be prefetched.
+
+	  If unsure, say Y.
+
+config SMN_COLOCATE
+	bool "Enable synaptic co-location"
+	depends on SMN && NUMA
+	default y
+	help
+	  Enable automatic NUMA placement optimization based on
+	  synaptic relationships. Strongly connected memory regions
+	  will be placed on the same NUMA node.
+
+	  If unsure, say Y.
+
+config SMN_MAX_SYNAPSES
+	int "Maximum synapses per neuron"
+	depends on SMN
+	range 4 64
+	default 16
+	help
+	  Maximum number of outgoing synapses per neuron. Higher values
+	  allow more complex learned relationships but increase memory
+	  overhead.
+
+	  If unsure, say 16.
+
+config SMN_PRUNE_INTERVAL
+	int "Synapse pruning interval (ms)"
+	depends on SMN
+	range 1000 300000
+	default 60000
+	help
+	  Interval between synapse pruning operations in milliseconds.
+	  Weak synapses are periodically removed to maintain efficiency.
+
+	  If unsure, say 60000 (60 seconds).
