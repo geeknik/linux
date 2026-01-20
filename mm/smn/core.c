@@ -443,31 +443,112 @@ static int smn_debugfs_synapses_show(struct seq_file *m, void *v)
 {
 	struct synaptic_layer *layer;
 	struct synaptic_neuron *neuron;
-	int i, j;
+	int j;
+	u64 total_synapses = 0;
+	u64 total_weight = 0;
+	u32 max_weight = 0;
+	u32 min_weight = SMN_WEIGHT_MAX;
+	u32 predictive_count = 0;
+	u32 bidirectional_count = 0;
+	u32 colocate_count = 0;
+	u32 weight_buckets[11] = { 0 };
+	struct {
+		void *src;
+		void *dst;
+		u16 weight;
+		u8 flags;
+	} top_synapses[10];
+	int top_count = 0;
 
 	layer = smn_global.layers[LAYER_PAGE];
 	if (!layer)
 		return 0;
 
-	seq_printf(m, "=== Synapses (Page Layer, first 100) ===\n");
-
 	mutex_lock(&layer->lock);
-	i = 0;
 	list_for_each_entry(neuron, &layer->neuron_list, list) {
-		if (i++ >= 100)
-			break;
-
 		for (j = 0; j < neuron->out_count; j++) {
 			struct synapse *s = &neuron->outgoing[j];
-			seq_printf(m,
-				   "  %p -> %p: w=%u flags=0x%x pred=%u/%u\n",
-				   neuron->id.raw,
-				   s->dst ? s->dst->id.raw : NULL, s->weight,
-				   s->flags, s->correct_predictions,
-				   s->prediction_count);
+			int bucket;
+
+			total_synapses++;
+			total_weight += s->weight;
+
+			if (s->weight > max_weight)
+				max_weight = s->weight;
+			if (s->weight < min_weight)
+				min_weight = s->weight;
+
+			if (s->flags & SYNAPSE_FLAG_PREDICTIVE)
+				predictive_count++;
+			if (s->flags & SYNAPSE_FLAG_BIDIRECTIONAL)
+				bidirectional_count++;
+			if (s->flags & SYNAPSE_FLAG_COLOCATE)
+				colocate_count++;
+
+			bucket = s->weight / 100;
+			if (bucket > 10)
+				bucket = 10;
+			weight_buckets[bucket]++;
+
+			if (top_count < 10 ||
+			    s->weight > top_synapses[9].weight) {
+				int pos = top_count < 10 ? top_count : 9;
+				int k;
+
+				for (k = pos; k > 0; k--) {
+					if (top_synapses[k - 1].weight >=
+					    s->weight)
+						break;
+					if (k < 10)
+						top_synapses[k] =
+							top_synapses[k - 1];
+				}
+				top_synapses[k].src = neuron->id.raw;
+				top_synapses[k].dst = s->dst ? s->dst->id.raw :
+							       NULL;
+				top_synapses[k].weight = s->weight;
+				top_synapses[k].flags = s->flags;
+				if (top_count < 10)
+					top_count++;
+			}
 		}
 	}
 	mutex_unlock(&layer->lock);
+
+	seq_printf(m, "=== Synapse Summary (Page Layer) ===\n");
+	seq_printf(m, "Total synapses: %llu\n", total_synapses);
+	if (total_synapses > 0) {
+		seq_printf(m, "Average weight: %llu\n",
+			   total_weight / total_synapses);
+		seq_printf(m, "Min weight: %u\n", min_weight);
+		seq_printf(m, "Max weight: %u\n", max_weight);
+	}
+	seq_printf(m, "\n=== Flag Counts ===\n");
+	seq_printf(m, "Predictive (w>%u): %u\n",
+		   smn_global.config.predictive_threshold, predictive_count);
+	seq_printf(m, "Bidirectional: %u\n", bidirectional_count);
+	seq_printf(m, "Colocate (w>%u): %u\n",
+		   smn_global.config.colocate_threshold, colocate_count);
+
+	seq_printf(m, "\n=== Weight Distribution ===\n");
+	seq_printf(m, "  0-99:   %u\n", weight_buckets[0]);
+	seq_printf(m, "100-199:  %u\n", weight_buckets[1]);
+	seq_printf(m, "200-299:  %u\n", weight_buckets[2]);
+	seq_printf(m, "300-399:  %u\n", weight_buckets[3]);
+	seq_printf(m, "400-499:  %u\n", weight_buckets[4]);
+	seq_printf(m, "500-599:  %u\n", weight_buckets[5]);
+	seq_printf(m, "600-699:  %u\n", weight_buckets[6]);
+	seq_printf(m, "700-799:  %u\n", weight_buckets[7]);
+	seq_printf(m, "800-899:  %u\n", weight_buckets[8]);
+	seq_printf(m, "900-999:  %u\n", weight_buckets[9]);
+	seq_printf(m, "1000:     %u\n", weight_buckets[10]);
+
+	seq_printf(m, "\n=== Top %d Strongest Synapses ===\n", top_count);
+	for (j = 0; j < top_count; j++) {
+		seq_printf(m, "  %p -> %p: w=%u flags=0x%x\n",
+			   top_synapses[j].src, top_synapses[j].dst,
+			   top_synapses[j].weight, top_synapses[j].flags);
+	}
 
 	return 0;
 }

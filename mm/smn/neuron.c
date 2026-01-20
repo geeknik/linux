@@ -199,45 +199,102 @@ struct page *smn_neuron_to_page(struct synaptic_neuron *neuron)
 	return neuron->id.page;
 }
 
-/*
- * Mark page as accessed (entry point from MM subsystem)
- */
+static void smn_batch_flush(struct synaptic_layer *layer)
+{
+	int i, count;
+	struct synaptic_neuron *neurons[SMN_BATCH_SIZE];
+	unsigned long flags;
+
+	spin_lock_irqsave(&layer->recent_lock, flags);
+	count = atomic_read(&layer->batch_count);
+	if (count == 0) {
+		spin_unlock_irqrestore(&layer->recent_lock, flags);
+		return;
+	}
+
+	if (count > SMN_BATCH_SIZE)
+		count = SMN_BATCH_SIZE;
+
+	for (i = 0; i < count; i++) {
+		neurons[i] = layer->batch_queue[i];
+		layer->batch_queue[i] = NULL;
+	}
+	atomic_set(&layer->batch_count, 0);
+	layer->batch_start_time = smn_time_ms();
+	spin_unlock_irqrestore(&layer->recent_lock, flags);
+
+	for (i = 0; i < count; i++) {
+		if (neurons[i])
+			smn_learn_from_recent(neurons[i]);
+	}
+}
+
+void smn_batch_work_func(struct work_struct *work)
+{
+	struct synaptic_layer *layer =
+		container_of(work, struct synaptic_layer, batch_work);
+	smn_batch_flush(layer);
+}
+
+static void smn_batch_add(struct synaptic_layer *layer,
+			  struct synaptic_neuron *neuron)
+{
+	int idx;
+	u64 now;
+	unsigned long flags;
+
+	spin_lock_irqsave(&layer->recent_lock, flags);
+	idx = atomic_fetch_add(1, &layer->batch_count);
+	if (idx < SMN_BATCH_SIZE)
+		layer->batch_queue[idx] = neuron;
+	spin_unlock_irqrestore(&layer->recent_lock, flags);
+
+	if (idx + 1 >= SMN_BATCH_SIZE) {
+		if (smn_global.stats_wq)
+			queue_work(smn_global.stats_wq, &layer->batch_work);
+		return;
+	}
+
+	now = smn_time_ms();
+	if (now - layer->batch_start_time >= SMN_BATCH_INTERVAL_MS) {
+		if (smn_global.stats_wq)
+			queue_work(smn_global.stats_wq, &layer->batch_work);
+	}
+}
+
 void smn_mark_page_accessed(struct page *page)
 {
 	struct synaptic_neuron *neuron;
 	struct synaptic_layer *layer;
+	int sample;
 
-	if (!smn_global.initialized)
-		return;
-
-	if (!page)
+	if (!smn_global.initialized || !page)
 		return;
 
 	layer = smn_global.layers[LAYER_PAGE];
 	if (!layer)
 		return;
 
-	/* Find or create neuron for this page */
+	sample = atomic_fetch_add(1, &layer->sample_counter);
+	if ((sample & (SMN_SAMPLE_RATE - 1)) != 0) {
+		layer->stats.total_activations++;
+		return;
+	}
+
 	neuron = smn_layer_find_neuron(layer, page_to_pfn(page));
 
 	if (!neuron) {
-		/* Create new neuron for this page */
 		neuron = smn_neuron_create(NEURON_PAGE, page);
 		if (IS_ERR(neuron))
 			return;
 
 		neuron->layer = layer;
 		neuron->nid = page_to_nid(page);
-
-		/* Add to layer */
 		smn_layer_add_neuron(layer, neuron);
 	}
 
-	/* Activate the neuron */
 	smn_neuron_activate(neuron);
-
-	/* Learn from recent activations */
-	smn_learn_from_recent(neuron);
+	smn_batch_add(layer, neuron);
 }
 
 /*

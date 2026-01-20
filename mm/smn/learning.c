@@ -170,7 +170,7 @@ void smn_learn_from_recent(struct synaptic_neuron *neuron)
 			delta_ns = other_time_ns - neuron_time_ns;
 
 		if (delta_ns > coactivation_window_ns)
-			break;
+			continue;
 
 		spin_unlock_irqrestore(&layer->recent_lock, flags);
 

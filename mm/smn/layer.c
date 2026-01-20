@@ -59,6 +59,13 @@ struct synaptic_layer *smn_layer_create(enum layer_type type)
 
 	INIT_DELAYED_WORK(&layer->prune_work, smn_prune_work_func);
 
+	/* Initialize batch processing state */
+	atomic_set(&layer->sample_counter, 0);
+	atomic_set(&layer->batch_count, 0);
+	layer->batch_start_time = 0;
+	memset(layer->batch_queue, 0, sizeof(layer->batch_queue));
+	INIT_WORK(&layer->batch_work, smn_batch_work_func);
+
 	SMN_DBG("Created layer %p (type=%d)\n", layer, type);
 
 	return layer;
@@ -78,6 +85,9 @@ void smn_layer_destroy(struct synaptic_layer *layer)
 
 	/* Cancel prune work */
 	cancel_delayed_work_sync(&layer->prune_work);
+
+	/* Cancel batch work */
+	cancel_work_sync(&layer->batch_work);
 
 	/* Destroy all neurons */
 	list_for_each_entry_safe(neuron, tmp, &layer->neuron_list, list) {

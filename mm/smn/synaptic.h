@@ -55,7 +55,12 @@
 #define SMN_ACTIVE_RATE_THRESHOLD 10 /* Hz */
 
 /* Debug */
-#define SMN_DEBUG 0 /* Enable debug output */
+#define SMN_DEBUG 0
+
+/* Sampling: process 1/N accesses. Batching: learn after N activations or Nms */
+#define SMN_SAMPLE_RATE 16
+#define SMN_BATCH_SIZE 32
+#define SMN_BATCH_INTERVAL_MS 10
 
 /*
  * Enums
@@ -270,6 +275,12 @@ struct synaptic_layer {
 	spinlock_t recent_lock;
 	u32 recent_count;
 	struct delayed_work prune_work;
+
+	atomic_t sample_counter;
+	struct synaptic_neuron *batch_queue[SMN_BATCH_SIZE];
+	atomic_t batch_count;
+	u64 batch_start_time;
+	struct work_struct batch_work;
 };
 
 /**
@@ -435,6 +446,9 @@ int smn_layer_remove_neuron(struct synaptic_layer *layer,
 
 /* Page lifecycle hooks */
 void smn_page_free(struct page *page);
+
+/* Batch processing */
+void smn_batch_work_func(struct work_struct *work);
 
 /*
  * Utility Functions
